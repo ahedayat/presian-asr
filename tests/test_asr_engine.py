@@ -32,6 +32,7 @@ def test_load_model_caches_pipeline(
     mock_pipeline.assert_called_once()
 
 
+@patch("persian_asr_app.core.asr_engine.convert_to_temp_wav_16k_mono")
 @patch("persian_asr_app.core.asr_engine.pipeline")
 @patch("persian_asr_app.core.asr_engine.AutoModelForSpeechSeq2Seq")
 @patch("persian_asr_app.core.asr_engine.AutoProcessor")
@@ -39,6 +40,7 @@ def test_transcribe_returns_structured_result(
     mock_processor_cls: MagicMock,
     mock_model_cls: MagicMock,
     mock_pipeline: MagicMock,
+    mock_convert: MagicMock,
     tmp_path: Path,
 ) -> None:
     audio_file = tmp_path / "sample.wav"
@@ -47,7 +49,7 @@ def test_transcribe_returns_structured_result(
     mock_pipe = MagicMock(return_value={"text": "  سلام  "})
     mock_pipeline.return_value = mock_pipe
 
-    engine = ASREngine(model_id="C1Tech/whisper_small_persian")
+    engine = ASREngine(model_id="C1Tech/whisper_small_persian", convert_to_16k_mono_wav=False)
     result = engine.transcribe(str(audio_file))
 
     assert result == {
@@ -56,8 +58,10 @@ def test_transcribe_returns_structured_result(
         "model_id": "C1Tech/whisper_small_persian",
     }
     mock_pipe.assert_called_once()
+    mock_convert.assert_not_called()
     call_kwargs = mock_pipe.call_args.kwargs
     assert call_kwargs["return_timestamps"] is False
+    assert call_kwargs["batch_size"] == 1
     assert call_kwargs["generate_kwargs"] == {
         "language": "fa",
         "task": "transcribe",
@@ -65,6 +69,44 @@ def test_transcribe_returns_structured_result(
     }
 
 
+@patch("persian_asr_app.core.asr_engine.convert_to_temp_wav_16k_mono")
+@patch("persian_asr_app.core.asr_engine.pipeline")
+@patch("persian_asr_app.core.asr_engine.AutoModelForSpeechSeq2Seq")
+@patch("persian_asr_app.core.asr_engine.AutoProcessor")
+def test_transcribe_uses_temp_wav_when_normalization_enabled(
+    mock_processor_cls: MagicMock,
+    mock_model_cls: MagicMock,
+    mock_pipeline: MagicMock,
+    mock_convert: MagicMock,
+    tmp_path: Path,
+) -> None:
+    audio_file = tmp_path / "sample.mp3"
+    audio_file.write_bytes(b"ID3")
+    temp_wav = tmp_path / "temp.wav"
+    temp_wav.write_bytes(b"RIFF")
+    mock_convert.return_value = temp_wav
+
+    mock_pipe = MagicMock(return_value={"text": "سلام"})
+    mock_pipeline.return_value = mock_pipe
+
+    engine = ASREngine(convert_to_16k_mono_wav=True)
+    engine.transcribe(str(audio_file))
+
+    mock_convert.assert_called_once_with(str(audio_file.resolve()))
+    mock_pipe.assert_called_once_with(
+        str(temp_wav),
+        batch_size=1,
+        return_timestamps=False,
+        generate_kwargs={
+            "language": "fa",
+            "task": "transcribe",
+            "condition_on_prev_tokens": False,
+        },
+    )
+    assert not temp_wav.exists()
+
+
+@patch("persian_asr_app.core.asr_engine.convert_to_temp_wav_16k_mono")
 @patch("persian_asr_app.core.asr_engine.pipeline")
 @patch("persian_asr_app.core.asr_engine.AutoModelForSpeechSeq2Seq")
 @patch("persian_asr_app.core.asr_engine.AutoProcessor")
@@ -72,6 +114,7 @@ def test_transcribe_includes_chunks_when_timestamps_enabled(
     mock_processor_cls: MagicMock,
     mock_model_cls: MagicMock,
     mock_pipeline: MagicMock,
+    mock_convert: MagicMock,
     tmp_path: Path,
 ) -> None:
     audio_file = tmp_path / "sample.mp3"
@@ -81,7 +124,7 @@ def test_transcribe_includes_chunks_when_timestamps_enabled(
     mock_pipe = MagicMock(return_value={"text": "سلام", "chunks": chunks})
     mock_pipeline.return_value = mock_pipe
 
-    engine = ASREngine(return_timestamps=True)
+    engine = ASREngine(return_timestamps=True, convert_to_16k_mono_wav=False)
     result = engine.transcribe(str(audio_file))
 
     assert result["text"] == "سلام"

@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import sys
 
+from persian_asr_app.app_logging import setup_logging
 from persian_asr_app.core.asr_engine import ASREngine
 
 
 def run_cli(audio_path: str) -> None:
     """Transcribe an audio file and print the result."""
+    setup_logging()
     engine = ASREngine()
     result = engine.transcribe(audio_path)
     print(result["text"])
@@ -21,6 +23,8 @@ def run_gui() -> None:
     from PyQt6.QtWidgets import QApplication
 
     from persian_asr_app.ui.main_window import MainWindow
+
+    setup_logging()
 
     app = QApplication(sys.argv)
     app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)

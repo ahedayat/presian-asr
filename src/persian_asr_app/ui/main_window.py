@@ -17,7 +17,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from persian_asr_app.config import LONG_AUDIO_THRESHOLD_MINUTES
 from persian_asr_app.core.asr_engine import ASREngine
+from persian_asr_app.core.audio_utils import (
+    estimate_audio_duration,
+    format_duration,
+    is_audio_longer_than_threshold,
+    validate_audio_path,
+)
 from persian_asr_app.core.transcription_format import (
     format_display_text,
     format_export_text,
@@ -102,6 +109,19 @@ class MainWindow(QMainWindow):
         self._file_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._file_label)
 
+        self._duration_label = QLabel("")
+        self._duration_label.setObjectName("durationLabel")
+        self._duration_label.setWordWrap(True)
+        self._duration_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._duration_label)
+
+        self._long_audio_warning = QLabel("")
+        self._long_audio_warning.setObjectName("longAudioWarning")
+        self._long_audio_warning.setWordWrap(True)
+        self._long_audio_warning.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        self._long_audio_warning.hide()
+        layout.addWidget(self._long_audio_warning)
+
         self._timestamps_checkbox = QCheckBox("نمایش زمان‌بندی تقریبی")
         self._timestamps_checkbox.setChecked(False)
         layout.addWidget(self._timestamps_checkbox)
@@ -159,6 +179,18 @@ class MainWindow(QMainWindow):
             QLabel#filePathLabel {
                 font-size: 12px;
                 color: #555555;
+            }
+            QLabel#durationLabel {
+                font-size: 12px;
+                color: #374151;
+            }
+            QLabel#longAudioWarning {
+                font-size: 12px;
+                color: #b45309;
+                background-color: #fffbeb;
+                border: 1px solid #fcd34d;
+                border-radius: 4px;
+                padding: 8px;
             }
             QLabel#modelStatusLabel {
                 font-size: 12px;
@@ -282,14 +314,75 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
+        try:
+            validate_audio_path(path)
+        except (FileNotFoundError, ValueError) as exc:
+            self._audio_path = None
+            self._duration_label.clear()
+            self._long_audio_warning.hide()
+            self._transcribe_btn.setEnabled(False)
+            self._file_label.setText(NO_FILE_TEXT)
+            QMessageBox.warning(self, "فایل نامعتبر", str(exc))
+            return
+
         self._audio_path = path
         self._file_label.setText(path)
+        self._update_audio_metadata(path)
         self._transcribe_btn.setEnabled(True)
         self._status_label.setText("فایل انتخاب شد")
+
+    def _update_audio_metadata(self, path: str) -> None:
+        duration = estimate_audio_duration(path)
+        threshold_minutes = LONG_AUDIO_THRESHOLD_MINUTES
+
+        if duration is None:
+            self._duration_label.setText("مدت زمان: نامشخص")
+            self._long_audio_warning.setText(
+                "مدت زمان فایل مشخص نشد. برای فایل‌های طولانی، تبدیل ممکن است "
+                "زمان‌بر باشد یا با خطا مواجه شود. فعلاً تقسیم خودکار فایل "
+                "پشتیبانی نمی‌شود."
+            )
+            self._long_audio_warning.show()
+            return
+
+        duration_text = format_duration(duration)
+        self._duration_label.setText(f"مدت زمان: {duration_text}")
+
+        if is_audio_longer_than_threshold(duration, threshold_minutes):
+            threshold_text = format_duration(threshold_minutes * 60)
+            self._long_audio_warning.setText(
+                f"هشدار: این فایل ({duration_text}) از آستانه {threshold_text} "
+                f"({int(threshold_minutes)} دقیقه) طولانی‌تر است. "
+                "تبدیل روی CPU ممکن است بسیار زمان‌بر باشد، حافظه کافی نداشته باشد، "
+                "یا با خطا متوقف شود. فعلاً تقسیم خودکار فایل (chunking) "
+                "پیاده‌سازی نشده است."
+            )
+            self._long_audio_warning.show()
+            QMessageBox.warning(
+                self,
+                "فایل صوتی طولانی",
+                self._long_audio_warning.text(),
+            )
+        else:
+            self._long_audio_warning.hide()
 
     def _start_transcription(self) -> None:
         if not self._audio_path or self._is_transcribing():
             return
+
+        if self._long_audio_warning.isVisible():
+            reply = QMessageBox.question(
+                self,
+                "ادامه تبدیل؟",
+                (
+                    f"{self._long_audio_warning.text()}\n\n"
+                    "آیا می‌خواهید با وجود این محدودیت‌ها ادامه دهید؟"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         self._transcription_cancelled = False
         self._set_busy(True)
@@ -436,6 +529,8 @@ class MainWindow(QMainWindow):
         self._last_result = None
         self._last_processing_time = None
         self._file_label.setText(NO_FILE_TEXT)
+        self._duration_label.clear()
+        self._long_audio_warning.hide()
         self._result_edit.clear()
         self._transcribe_btn.setEnabled(False)
         self._save_btn.setEnabled(False)
