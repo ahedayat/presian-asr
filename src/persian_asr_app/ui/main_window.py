@@ -36,6 +36,7 @@ class MainWindow(QMainWindow):
         self._audio_path: str | None = None
         self._thread: QThread | None = None
         self._worker: TranscriptionWorker | None = None
+        self._transcription_cancelled = False
 
         self._setup_ui()
         self._apply_styles()
@@ -70,10 +71,18 @@ class MainWindow(QMainWindow):
         self._file_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._file_label)
 
+        transcribe_row = QHBoxLayout()
         self._transcribe_btn = QPushButton("تبدیل به متن")
         self._transcribe_btn.setEnabled(False)
         self._transcribe_btn.clicked.connect(self._start_transcription)
-        layout.addWidget(self._transcribe_btn)
+        transcribe_row.addWidget(self._transcribe_btn)
+
+        self._cancel_btn = QPushButton("لغو")
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.clicked.connect(self._cancel_transcription)
+        transcribe_row.addWidget(self._cancel_btn)
+        transcribe_row.addStretch()
+        layout.addLayout(transcribe_row)
 
         self._result_edit = QTextEdit()
         self._result_edit.setReadOnly(True)
@@ -131,6 +140,12 @@ class MainWindow(QMainWindow):
             QPushButton:disabled {
                 background-color: #9ca3af;
             }
+            QPushButton#cancelButton {
+                background-color: #dc2626;
+            }
+            QPushButton#cancelButton:hover:enabled {
+                background-color: #b91c1c;
+            }
             QTextEdit {
                 font-size: 14px;
                 padding: 8px;
@@ -140,6 +155,7 @@ class MainWindow(QMainWindow):
             }
             """
         )
+        self._cancel_btn.setObjectName("cancelButton")
 
     def _select_audio_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -159,44 +175,79 @@ class MainWindow(QMainWindow):
     def _start_transcription(self) -> None:
         if not self._audio_path:
             return
+        if self._thread is not None and self._thread.isRunning():
+            return
 
+        self._transcription_cancelled = False
         self._set_busy(True)
         self._status_label.setText("در حال تبدیل... (اولین بار ممکن است مدل دانلود شود)")
         self._result_edit.clear()
 
         self._thread = QThread()
-        self._worker = TranscriptionWorker(self._engine, self._audio_path)
+        self._worker = TranscriptionWorker(self._audio_path, engine=self._engine)
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)
+        self._worker.started.connect(self._on_transcription_started)
+        self._worker.progress.connect(self._on_transcription_progress)
         self._worker.finished.connect(self._on_transcription_finished)
-        self._worker.error.connect(self._on_transcription_error)
+        self._worker.failed.connect(self._on_transcription_failed)
         self._worker.finished.connect(self._thread.quit)
-        self._worker.error.connect(self._thread.quit)
+        self._worker.failed.connect(self._thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.error.connect(self._worker.deleteLater)
+        self._worker.failed.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.finished.connect(self._cleanup_thread)
 
         self._thread.start()
 
-    def _on_transcription_finished(self, text: str) -> None:
-        self._result_edit.setPlainText(text)
+    def _cancel_transcription(self) -> None:
+        """UI-level cancellation: ignore the result when the worker finishes."""
+        if self._thread is None or not self._thread.isRunning():
+            return
+
+        self._transcription_cancelled = True
+        self._cancel_btn.setEnabled(False)
+        self._status_label.setText(
+            "لغو شد — پردازش در پس‌زمینه ادامه دارد و نتیجه نادیده گرفته می‌شود"
+        )
+
+    def _on_transcription_started(self) -> None:
+        self._status_label.setText("تبدیل آغاز شد...")
+
+    def _on_transcription_progress(self, message: str) -> None:
+        self._status_label.setText(message)
+
+    def _on_transcription_finished(self, result: dict) -> None:
+        if self._transcription_cancelled:
+            self._status_label.setText("تبدیل لغو شد")
+            return
+
+        self._result_edit.setPlainText(result["text"])
         self._status_label.setText("تبدیل با موفقیت انجام شد")
         self._set_busy(False)
 
-    def _on_transcription_error(self, message: str) -> None:
+    def _on_transcription_failed(self, message: str) -> None:
+        if self._transcription_cancelled:
+            self._status_label.setText("تبدیل لغو شد")
+            return
+
         self._status_label.setText("خطا در تبدیل")
         self._set_busy(False)
         QMessageBox.critical(self, "خطا", message)
 
     def _cleanup_thread(self) -> None:
+        if self._thread is not None:
+            self._thread.wait()
         self._thread = None
         self._worker = None
+        if self._transcription_cancelled:
+            self._set_busy(False)
 
     def _set_busy(self, busy: bool) -> None:
         self._select_btn.setEnabled(not busy)
         self._transcribe_btn.setEnabled(not busy and self._audio_path is not None)
+        self._cancel_btn.setEnabled(busy and not self._transcription_cancelled)
         self._copy_btn.setEnabled(not busy)
         self._clear_btn.setEnabled(not busy)
 
