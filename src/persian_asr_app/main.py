@@ -1,14 +1,38 @@
 """Application entry point."""
 
-import argparse
+from __future__ import annotations
 
-from persian_asr_app import __version__
+import argparse
+import sys
+
 from persian_asr_app.core.asr_engine import ASREngine
+
+
+def run_cli(audio_path: str) -> None:
+    """Transcribe an audio file and print the result."""
+    engine = ASREngine()
+    result = engine.transcribe(audio_path)
+    print(result["text"])
+
+
+def run_gui() -> None:
+    """Launch the PyQt6 desktop application."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QApplication
+
+    from persian_asr_app.ui.main_window import MainWindow
+
+    app = QApplication(sys.argv)
+    app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Persian ASR — transcribe audio files from the command line.",
+        description="Persian ASR — transcribe audio files from the command line or desktop UI.",
     )
     parser.add_argument(
         "--audio",
@@ -18,16 +42,10 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.audio:
-        engine = ASREngine()
-        result = engine.transcribe(args.audio)
-        print(result["text"])
+        run_cli(args.audio)
         return
 
-    print(
-        f"Persian ASR Desktop Application v{__version__}\n"
-        "The desktop UI is not implemented yet.\n"
-        "Transcribe from the CLI with: python -m persian_asr_app.main --audio path/to/audio.mp3"
-    )
+    run_gui()
 
 
 if __name__ == "__main__":
