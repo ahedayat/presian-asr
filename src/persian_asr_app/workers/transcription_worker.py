@@ -19,7 +19,7 @@ class TranscriptionWorker(QObject):
     def run(self) -> None:
         """Transcribe audio and emit the result or an error."""
         try:
-            text = self.engine.transcribe(self.audio_path)
-            self.finished.emit(text)
+            result = self.engine.transcribe(self.audio_path)
+            self.finished.emit(result["text"])
         except Exception as exc:  # noqa: BLE001 — surface any failure to the UI
             self.error.emit(str(exc))

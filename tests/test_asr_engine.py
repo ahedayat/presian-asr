@@ -3,26 +3,12 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 
-from persian_asr_app.core.asr_engine import ASREngine, _resolve_dtype
+from persian_asr_app.core.asr_engine import ASREngine
 
 
-def test_resolve_dtype_defaults_to_float32() -> None:
-    import torch
-
-    assert _resolve_dtype("float32") == torch.float32
-    assert _resolve_dtype("unknown") == torch.float32
-
-
-def test_engine_not_loaded_raises() -> None:
-    engine = ASREngine()
-    with pytest.raises(RuntimeError, match="not loaded"):
-        engine.transcribe(np.zeros(16000, dtype=np.float32))
-
-
-def test_engine_is_loaded_flag() -> None:
+def test_engine_not_loaded_before_transcribe() -> None:
     engine = ASREngine()
     assert engine.is_loaded is False
 
@@ -30,44 +16,112 @@ def test_engine_is_loaded_flag() -> None:
 @patch("persian_asr_app.core.asr_engine.pipeline")
 @patch("persian_asr_app.core.asr_engine.AutoModelForSpeechSeq2Seq")
 @patch("persian_asr_app.core.asr_engine.AutoProcessor")
-def test_transcribe_numpy_waveform(
+def test_load_model_caches_pipeline(
     mock_processor_cls: MagicMock,
     mock_model_cls: MagicMock,
     mock_pipeline: MagicMock,
 ) -> None:
-    mock_pipe = MagicMock(return_value={"text": "  سلام  "})
-    mock_pipeline.return_value = mock_pipe
+    mock_pipeline.return_value = MagicMock()
 
     engine = ASREngine()
-    engine.load()
+    engine.load_model()
+    engine.load_model()
 
-    waveform = np.zeros(16000, dtype=np.float32)
-    text = engine.transcribe(waveform)
-
-    assert text == "سلام"
-    mock_pipe.assert_called_once()
-    call_args = mock_pipe.call_args
-    assert call_args[0][0]["sampling_rate"] == 16000
-    assert call_args[1]["generate_kwargs"]["language"] == "fa"
+    mock_processor_cls.from_pretrained.assert_called_once()
+    mock_model_cls.from_pretrained.assert_called_once()
+    mock_pipeline.assert_called_once()
 
 
 @patch("persian_asr_app.core.asr_engine.pipeline")
 @patch("persian_asr_app.core.asr_engine.AutoModelForSpeechSeq2Seq")
 @patch("persian_asr_app.core.asr_engine.AutoProcessor")
-@patch("persian_asr_app.core.asr_engine.load_audio")
-def test_transcribe_file_path(
-    mock_load_audio: MagicMock,
+def test_transcribe_returns_structured_result(
+    mock_processor_cls: MagicMock,
+    mock_model_cls: MagicMock,
+    mock_pipeline: MagicMock,
+    tmp_path: Path,
+) -> None:
+    audio_file = tmp_path / "sample.wav"
+    audio_file.write_bytes(b"RIFF")
+
+    mock_pipe = MagicMock(return_value={"text": "  سلام  "})
+    mock_pipeline.return_value = mock_pipe
+
+    engine = ASREngine(model_id="C1Tech/whisper_small_persian")
+    result = engine.transcribe(str(audio_file))
+
+    assert result == {
+        "text": "سلام",
+        "audio_path": str(audio_file.resolve()),
+        "model_id": "C1Tech/whisper_small_persian",
+    }
+    mock_pipe.assert_called_once()
+    call_kwargs = mock_pipe.call_args.kwargs
+    assert call_kwargs["return_timestamps"] is False
+    assert call_kwargs["generate_kwargs"] == {
+        "language": "fa",
+        "task": "transcribe",
+        "condition_on_prev_tokens": False,
+    }
+
+
+@patch("persian_asr_app.core.asr_engine.pipeline")
+@patch("persian_asr_app.core.asr_engine.AutoModelForSpeechSeq2Seq")
+@patch("persian_asr_app.core.asr_engine.AutoProcessor")
+def test_transcribe_includes_chunks_when_timestamps_enabled(
+    mock_processor_cls: MagicMock,
+    mock_model_cls: MagicMock,
+    mock_pipeline: MagicMock,
+    tmp_path: Path,
+) -> None:
+    audio_file = tmp_path / "sample.mp3"
+    audio_file.write_bytes(b"ID3")
+
+    chunks = [{"text": "سلام", "timestamp": (0.0, 1.0)}]
+    mock_pipe = MagicMock(return_value={"text": "سلام", "chunks": chunks})
+    mock_pipeline.return_value = mock_pipe
+
+    engine = ASREngine(return_timestamps=True)
+    result = engine.transcribe(str(audio_file))
+
+    assert result["text"] == "سلام"
+    assert result["chunks"] == chunks
+
+
+@patch("persian_asr_app.core.asr_engine.AutoProcessor")
+def test_load_model_gated_repo_error(mock_processor_cls: MagicMock) -> None:
+    from huggingface_hub.errors import GatedRepoError
+
+    mock_processor_cls.from_pretrained.side_effect = GatedRepoError(
+        "403 Client Error",
+        response=MagicMock(status_code=403),
+    )
+
+    engine = ASREngine()
+    with pytest.raises(RuntimeError, match="gated model"):
+        engine.load_model()
+
+
+@patch("persian_asr_app.core.asr_engine.pipeline")
+@patch("persian_asr_app.core.asr_engine.AutoModelForSpeechSeq2Seq")
+@patch("persian_asr_app.core.asr_engine.AutoProcessor")
+def test_model_loaded_with_cpu_float32_settings(
     mock_processor_cls: MagicMock,
     mock_model_cls: MagicMock,
     mock_pipeline: MagicMock,
 ) -> None:
-    mock_load_audio.return_value = np.zeros(16000, dtype=np.float32)
-    mock_pipe = MagicMock(return_value={"text": "test"})
-    mock_pipeline.return_value = mock_pipe
+    import torch
 
-    engine = ASREngine()
-    engine.load()
-    text = engine.transcribe(Path("/tmp/sample.wav"))
+    engine = ASREngine(device="cpu")
+    engine.load_model()
 
-    assert text == "test"
-    mock_load_audio.assert_called_once_with("/tmp/sample.wav")
+    mock_model_cls.from_pretrained.assert_called_once_with(
+        engine.model_id,
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=True,
+        use_safetensors=True,
+    )
+    mock_pipeline.assert_called_once()
+    pipeline_kwargs = mock_pipeline.call_args.kwargs
+    assert pipeline_kwargs["device"] == "cpu"
+    assert pipeline_kwargs["dtype"] == torch.float32
