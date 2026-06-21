@@ -27,20 +27,17 @@ def test_worker_emits_finished_on_success(qcoreapp: QCoreApplication) -> None:
         "model_id": "test-model",
     }
 
-    worker = TranscriptionWorker("/tmp/sample.wav", engine=engine)
+    worker = TranscriptionWorker("/tmp/sample.wav", engine=engine, return_timestamps=True)
     finished_results: list[dict] = []
     worker.finished.connect(finished_results.append)
 
     worker.run()
 
+    assert engine.return_timestamps is True
     engine.transcribe.assert_called_once_with("/tmp/sample.wav")
-    assert finished_results == [
-        {
-            "text": "سلام",
-            "audio_path": "/tmp/sample.wav",
-            "model_id": "test-model",
-        }
-    ]
+    assert finished_results[0]["text"] == "سلام"
+    assert "processing_time" in finished_results[0]
+    assert finished_results[0]["processing_time"] >= 0
 
 
 def test_worker_emits_failed_on_error(qcoreapp: QCoreApplication) -> None:

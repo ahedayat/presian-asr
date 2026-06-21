@@ -7,5 +7,21 @@ from persian_asr_app.core.audio_utils import (
     load_audio,
     validate_audio_path,
 )
+from persian_asr_app.core.transcription_format import (
+    format_display_text,
+    format_export_text,
+    format_processing_time,
+    format_timestamp,
+)
 
-__all__ = ["ASREngine", "SAMPLE_RATE", "ensure_mono", "load_audio", "validate_audio_path"]
+__all__ = [
+    "ASREngine",
+    "SAMPLE_RATE",
+    "ensure_mono",
+    "format_display_text",
+    "format_export_text",
+    "format_processing_time",
+    "format_timestamp",
+    "load_audio",
+    "validate_audio_path",
+]

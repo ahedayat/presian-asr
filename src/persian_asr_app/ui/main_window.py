@@ -5,6 +5,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, QThread
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -17,14 +18,25 @@ from PyQt6.QtWidgets import (
 )
 
 from persian_asr_app.core.asr_engine import ASREngine
+from persian_asr_app.core.transcription_format import (
+    format_display_text,
+    format_export_text,
+    format_processing_time,
+)
+from persian_asr_app.workers.model_load_worker import ModelLoadWorker
 from persian_asr_app.workers.transcription_worker import TranscriptionWorker
 
 AUDIO_FILTER = (
     "فایل‌های صوتی (*.wav *.mp3 *.m4a *.flac *.ogg *.aac);;"
     "همه فایل‌ها (*.*)"
 )
+TEXT_FILTER = "فایل متنی (*.txt);;همه فایل‌ها (*.*)"
 
 NO_FILE_TEXT = "فایلی انتخاب نشده است"
+
+MODEL_STATUS_NOT_LOADED = "مدل: بارگذاری نشده"
+MODEL_STATUS_LOADING = "مدل: در حال بارگذاری..."
+MODEL_STATUS_READY = "مدل: آماده"
 
 
 class MainWindow(QMainWindow):
@@ -34,12 +46,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._engine = ASREngine()
         self._audio_path: str | None = None
+        self._last_result: dict | None = None
+        self._last_processing_time: float | None = None
         self._thread: QThread | None = None
         self._worker: TranscriptionWorker | None = None
+        self._load_thread: QThread | None = None
+        self._load_worker: ModelLoadWorker | None = None
         self._transcription_cancelled = False
 
         self._setup_ui()
         self._apply_styles()
+        self._update_model_status()
 
     def _setup_ui(self) -> None:
         self.setWindowTitle("تبدیل گفتار فارسی به متن")
@@ -58,6 +75,20 @@ class MainWindow(QMainWindow):
         header.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(header)
 
+        model_row = QHBoxLayout()
+        self._model_status_label = QLabel(MODEL_STATUS_NOT_LOADED)
+        self._model_status_label.setObjectName("modelStatusLabel")
+        self._model_status_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        model_row.addWidget(self._model_status_label)
+
+        self._preload_btn = QPushButton("بارگذاری مدل")
+        self._preload_btn.clicked.connect(self._start_model_preload)
+        model_row.addWidget(self._preload_btn)
+        model_row.addStretch()
+        layout.addLayout(model_row)
+
         file_row = QHBoxLayout()
         self._select_btn = QPushButton("انتخاب فایل صوتی")
         self._select_btn.clicked.connect(self._select_audio_file)
@@ -70,6 +101,10 @@ class MainWindow(QMainWindow):
         self._file_label.setWordWrap(True)
         self._file_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._file_label)
+
+        self._timestamps_checkbox = QCheckBox("نمایش زمان‌بندی تقریبی")
+        self._timestamps_checkbox.setChecked(False)
+        layout.addWidget(self._timestamps_checkbox)
 
         transcribe_row = QHBoxLayout()
         self._transcribe_btn = QPushButton("تبدیل به متن")
@@ -93,9 +128,13 @@ class MainWindow(QMainWindow):
         action_row = QHBoxLayout()
         self._copy_btn = QPushButton("کپی متن")
         self._copy_btn.clicked.connect(self._copy_result)
+        self._save_btn = QPushButton("ذخیره متن")
+        self._save_btn.setEnabled(False)
+        self._save_btn.clicked.connect(self._save_result)
         self._clear_btn = QPushButton("پاک کردن")
         self._clear_btn.clicked.connect(self._clear_all)
         action_row.addWidget(self._copy_btn)
+        action_row.addWidget(self._save_btn)
         action_row.addWidget(self._clear_btn)
         action_row.addStretch()
         layout.addLayout(action_row)
@@ -120,6 +159,10 @@ class MainWindow(QMainWindow):
             QLabel#filePathLabel {
                 font-size: 12px;
                 color: #555555;
+            }
+            QLabel#modelStatusLabel {
+                font-size: 12px;
+                color: #374151;
             }
             QLabel#statusLabel {
                 font-size: 12px;
@@ -146,6 +189,10 @@ class MainWindow(QMainWindow):
             QPushButton#cancelButton:hover:enabled {
                 background-color: #b91c1c;
             }
+            QCheckBox {
+                font-size: 13px;
+                color: #374151;
+            }
             QTextEdit {
                 font-size: 14px;
                 padding: 8px;
@@ -156,6 +203,74 @@ class MainWindow(QMainWindow):
             """
         )
         self._cancel_btn.setObjectName("cancelButton")
+
+    def _update_model_status(self) -> None:
+        if self._engine.is_loaded:
+            self._model_status_label.setText(MODEL_STATUS_READY)
+            self._preload_btn.setEnabled(False)
+        elif self._is_model_loading():
+            self._model_status_label.setText(MODEL_STATUS_LOADING)
+            self._preload_btn.setEnabled(False)
+        else:
+            self._model_status_label.setText(MODEL_STATUS_NOT_LOADED)
+            self._preload_btn.setEnabled(not self._is_busy())
+
+    def _is_model_loading(self) -> bool:
+        return self._load_thread is not None and self._load_thread.isRunning()
+
+    def _is_transcribing(self) -> bool:
+        return self._thread is not None and self._thread.isRunning()
+
+    def _is_busy(self) -> bool:
+        return self._is_model_loading() or self._is_transcribing()
+
+    def _start_model_preload(self) -> None:
+        if self._engine.is_loaded or self._is_model_loading():
+            return
+
+        self._set_busy(True)
+        self._update_model_status()
+
+        self._load_thread = QThread()
+        self._load_worker = ModelLoadWorker(self._engine)
+        self._load_worker.moveToThread(self._load_thread)
+
+        self._load_thread.started.connect(self._load_worker.run)
+        self._load_worker.started.connect(self._on_model_load_started)
+        self._load_worker.progress.connect(self._on_model_load_progress)
+        self._load_worker.finished.connect(self._on_model_load_finished)
+        self._load_worker.failed.connect(self._on_model_load_failed)
+        self._load_worker.finished.connect(self._load_thread.quit)
+        self._load_worker.failed.connect(self._load_thread.quit)
+        self._load_worker.finished.connect(self._load_worker.deleteLater)
+        self._load_worker.failed.connect(self._load_worker.deleteLater)
+        self._load_thread.finished.connect(self._load_thread.deleteLater)
+        self._load_thread.finished.connect(self._cleanup_load_thread)
+
+        self._load_thread.start()
+
+    def _on_model_load_started(self) -> None:
+        self._model_status_label.setText(MODEL_STATUS_LOADING)
+
+    def _on_model_load_progress(self, message: str) -> None:
+        self._status_label.setText(message)
+
+    def _on_model_load_finished(self) -> None:
+        self._update_model_status()
+        self._set_busy(False)
+        self._status_label.setText("مدل با موفقیت بارگذاری شد")
+
+    def _on_model_load_failed(self, message: str) -> None:
+        self._update_model_status()
+        self._set_busy(False)
+        self._status_label.setText("خطا در بارگذاری مدل")
+        QMessageBox.critical(self, "خطا", message)
+
+    def _cleanup_load_thread(self) -> None:
+        if self._load_thread is not None:
+            self._load_thread.wait()
+        self._load_thread = None
+        self._load_worker = None
 
     def _select_audio_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -173,18 +288,26 @@ class MainWindow(QMainWindow):
         self._status_label.setText("فایل انتخاب شد")
 
     def _start_transcription(self) -> None:
-        if not self._audio_path:
-            return
-        if self._thread is not None and self._thread.isRunning():
+        if not self._audio_path or self._is_transcribing():
             return
 
         self._transcription_cancelled = False
         self._set_busy(True)
+        self._update_model_status()
         self._status_label.setText("در حال تبدیل... (اولین بار ممکن است مدل دانلود شود)")
         self._result_edit.clear()
+        self._last_result = None
+        self._last_processing_time = None
+        self._save_btn.setEnabled(False)
+
+        return_timestamps = self._timestamps_checkbox.isChecked()
 
         self._thread = QThread()
-        self._worker = TranscriptionWorker(self._audio_path, engine=self._engine)
+        self._worker = TranscriptionWorker(
+            self._audio_path,
+            engine=self._engine,
+            return_timestamps=return_timestamps,
+        )
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)
@@ -203,7 +326,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_transcription(self) -> None:
         """UI-level cancellation: ignore the result when the worker finishes."""
-        if self._thread is None or not self._thread.isRunning():
+        if not self._is_transcribing():
             return
 
         self._transcription_cancelled = True
@@ -217,17 +340,33 @@ class MainWindow(QMainWindow):
 
     def _on_transcription_progress(self, message: str) -> None:
         self._status_label.setText(message)
+        if not self._engine.is_loaded:
+            self._model_status_label.setText(MODEL_STATUS_LOADING)
 
     def _on_transcription_finished(self, result: dict) -> None:
+        self._update_model_status()
         if self._transcription_cancelled:
             self._status_label.setText("تبدیل لغو شد")
             return
 
-        self._result_edit.setPlainText(result["text"])
-        self._status_label.setText("تبدیل با موفقیت انجام شد")
+        self._last_result = result
+        self._last_processing_time = result.get("processing_time")
+        self._result_edit.setPlainText(format_display_text(result))
+
+        processing_time = self._last_processing_time
+        if processing_time is not None:
+            status = (
+                f"تبدیل با موفقیت انجام شد "
+                f"({format_processing_time(processing_time)})"
+            )
+        else:
+            status = "تبدیل با موفقیت انجام شد"
+        self._status_label.setText(status)
+        self._save_btn.setEnabled(True)
         self._set_busy(False)
 
     def _on_transcription_failed(self, message: str) -> None:
+        self._update_model_status()
         if self._transcription_cancelled:
             self._status_label.setText("تبدیل لغو شد")
             return
@@ -249,7 +388,11 @@ class MainWindow(QMainWindow):
         self._transcribe_btn.setEnabled(not busy and self._audio_path is not None)
         self._cancel_btn.setEnabled(busy and not self._transcription_cancelled)
         self._copy_btn.setEnabled(not busy)
+        self._save_btn.setEnabled(not busy and self._last_result is not None)
         self._clear_btn.setEnabled(not busy)
+        self._timestamps_checkbox.setEnabled(not busy)
+        if not self._engine.is_loaded:
+            self._preload_btn.setEnabled(not busy)
 
     def _copy_result(self) -> None:
         text = self._result_edit.toPlainText()
@@ -260,9 +403,40 @@ class MainWindow(QMainWindow):
         QGuiApplication.clipboard().setText(text)
         self._status_label.setText("متن در حافظه کپی شد")
 
+    def _save_result(self) -> None:
+        if self._last_result is None:
+            self._status_label.setText("متنی برای ذخیره وجود ندارد")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "ذخیره متن",
+            "",
+            TEXT_FILTER,
+        )
+        if not path:
+            return
+
+        if not path.lower().endswith(".txt"):
+            path = f"{path}.txt"
+
+        content = format_export_text(self._last_result, self._last_processing_time)
+        try:
+            with open(path, "w", encoding="utf-8") as file:
+                file.write(content)
+        except OSError as exc:
+            self._status_label.setText("خطا در ذخیره فایل")
+            QMessageBox.critical(self, "خطا", str(exc))
+            return
+
+        self._status_label.setText(f"متن ذخیره شد: {path}")
+
     def _clear_all(self) -> None:
         self._audio_path = None
+        self._last_result = None
+        self._last_processing_time = None
         self._file_label.setText(NO_FILE_TEXT)
         self._result_edit.clear()
         self._transcribe_btn.setEnabled(False)
+        self._save_btn.setEnabled(False)
         self._status_label.setText("آماده")
